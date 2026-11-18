@@ -1,38 +1,28 @@
 # Product
 
-<!-- impeccable:product-schema 1 -->
-
 ## Platform
 
-web
+web (desktop browser, keyboard)
 
 ## Users
-Retro and nostalgia fans playing at a desktop keyboard, in short sessions, chasing a personal best. No account, instant start.
+Friends who want a quick race together: one person shares a link and everyone is racing within a minute. No accounts.
 
 ## Product Purpose
-A small browser Snake game. Success is a fast, reliable, satisfying run that makes players want one more try and beat their best score.
+An online 3D cross-country horse race. Success is a close, chaotic, readable race where clearing obstacles well (timing jumps, picking lines, spending stamina) beats just holding forward.
 
 ## Positioning
-The rules are the classic ones; the difference is exceptional feel and polish (game feel, motion, presentation) rather than new mechanics.
+Original setting and characters (the Drifter, four horse coats, a badlands canyon course). The only borrowed idea is a long-distance horse race across wild terrain.
 
 ## Operating Context
-Played in a desktop browser with arrow keys or WASD. The best score persists in localStorage under `snake-best`.
+Desktop browser, keyboard (WASD/arrows, Space, Shift). Up to 8 riders per room. A Node server hosts rooms. Solo practice works offline, with the best time stored in localStorage under `dustline-best`.
 
 ## Capabilities and Constraints
-- Vite + vanilla JS, no framework, no tests, dependency-free apart from Vite (see CLAUDE.md).
-- 20x20 grid on a 400x400 canvas; constants (`SIZE`, `CELLS`, `TICK_MS`) live at the top of `src/main.js`.
-- Desktop keyboard input only (arrows/WASD); touch support is not in scope.
-- Current features: score, persisted best, start/game-over overlay with "press any key" restart.
-- Undecided: new modes or mechanics (none planned).
-
-## Brand Commitments
-None confirmed beyond the name "Snake". The existing green-on-black look is incumbent, not declared binding.
-
-## Evidence on Hand
-No testimonials, leaderboards, or external assets exist; do not fabricate any.
+- Vite + three.js client, `ws` server (see CLAUDE.md).
+- Client-authoritative movement, relayed at 20 Hz. Fine for friendly races, not for ranked play.
+- One course. Coats and poncho colours are cosmetic.
 
 ## Product Principles
-- Feel over features: polish the classic loop instead of adding mechanics.
-- Instant start: no menus, accounts, or friction between page load and play.
-- Keyboard-first and legible at a glance while moving fast.
-- Stay dependency-free and small.
+- Join fast: a name and a link, nothing else.
+- Every obstacle is readable at full gallop.
+- Falling is a time penalty, never a dead end.
+- Keep the dependency list short.

@@ -1,233 +1,416 @@
-const SIZE = 20;
-const CELLS = 20;
-const TICK_MS = 110;
+import * as THREE from 'three';
+import { createRacer, PONCHOS } from './models.js';
+import { buildCourse, buildSky } from './track.js';
+import { Player, createInput, TUNING } from './player.js';
+import { Net } from './net.js';
+import { CHECKPOINTS, FINISH_Z, START_LINE_Z, centerX, baseHeight, sectionAt, startSlot } from './course.js';
+import * as ui from './ui.js';
 
-// 8-color palette, read from :root in style.css (the stylesheet loads before this script).
-const css = getComputedStyle(document.documentElement);
-const [INK, MOSS, FERN, LEAF, LIME, CREAM, APPLE, BARK] =
-  ['ink', 'moss', 'fern', 'leaf', 'lime', 'cream', 'apple', 'bark']
-    .map((n) => css.getPropertyValue(`--${n}`).trim());
+const { el } = ui;
+const DEBUG = new URLSearchParams(location.search).has('debug');
 
-// Sprite pixel maps: 10x10 art pixels per cell, '.' is transparent.
-const PALETTE = { k: INK, d: FERN, m: LEAF, l: LIME, w: CREAM, r: APPLE, b: BARK };
-const ART = 10;
-const PX = SIZE / ART;
+// ---------------------------------------------------------------- scene ----
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
 
-// Head and tail face right; rotated/flipped for the other directions.
-const HEAD = [
-  '..dddddd..',
-  '.dmllllmd.',
-  'dmmmmwkmmd',
-  'dmmmmwkmmd',
-  'dmmmmmmkmd',
-  'dmmmmmmkmd',
-  'dmmmmwkmmd',
-  'dmmmmwkmmd',
-  '.dmmmmmmd.',
-  '..dddddd..',
-];
-const TAIL = [
-  'dddd......',
-  'mmmmddd...',
-  'mlmmmmmdd.',
-  'mmmmmmmmmd',
-  'mmmmmmmmmd',
-  'mmmmmmmmmd',
-  'mmmmmmmmmd',
-  'mlmmmmmdd.',
-  'mmmmddd...',
-  'dddd......',
-];
-const BODY = [
-  'mmmmmmmmmm',
-  'mmlmmmmmlm',
-  'mlmmmmmlmm',
-  'mmmmmmmmmm',
-  'mmmmlmmmmm',
-  'mmmlmmmmmm',
-  'mmmmmmmmmm',
-  'mmlmmmmmlm',
-  'mlmmmmmlmm',
-  'mmmmmmmmmm',
-];
-const APPLE_MAP = [
-  '....b.mm..',
-  '....bmm...',
-  '.rrrrbrrr.',
-  'rrwwrrrrrr',
-  'rrwrrrrrrr',
-  'rrrrrrrrrr',
-  'rrrrrrrrbr',
-  'rrrrrrrbbr',
-  '.rrrrrbbb.',
-  '..rrrrbb..',
-];
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog('#e7a77a', 90, 430);
+const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 1200);
 
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-ctx.imageSmoothingEnabled = false;
-const scoreEl = document.getElementById('score');
-const bestEl = document.getElementById('best');
-const overlay = document.getElementById('overlay');
-const overlayTitle = document.getElementById('overlay-title');
-const overlayMsg = document.getElementById('overlay-msg');
+const sunDir = new THREE.Vector3(0.55, 0.42, 0.72).normalize();
+const sky = buildSky(scene, sunDir);
+scene.add(new THREE.HemisphereLight('#ffd9a8', '#7a4a2e', 1.25));
+const sun = new THREE.DirectionalLight('#ffd2a0', 2.4);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -35, right: 35, top: 35, bottom: -35, near: 1, far: 160 });
+sun.shadow.bias = -0.0005;
+scene.add(sun, sun.target);
 
-let best = 0;
-try { best = Number(localStorage.getItem('snake-best')) || 0; } catch {}
-bestEl.textContent = best;
+const course = buildCourse(scene);
 
-let snake, dir, nextDir, food, score, timer;
+function resize() {
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
 
-function reset() {
-  snake = [{ x: 10, y: 10 }, { x: 9, y: 10 }, { x: 8, y: 10 }];
-  dir = nextDir = { x: 1, y: 0 };
-  score = 0;
-  scoreEl.textContent = score;
-  placeFood();
-  draw();
+// ---------------------------------------------------------------- state ----
+const keys = createInput();
+const net = new Net();
+const me = new Player(0);
+
+let profile = { name: '', coat: 'chestnut', poncho: PONCHOS.crimson };
+try { profile = { ...profile, ...JSON.parse(localStorage.getItem('dustline-profile')) }; } catch {}
+const saveProfile = () => { try { localStorage.setItem('dustline-profile', JSON.stringify(profile)); } catch {} };
+
+const state = {
+  mode: 'menu', // menu | lobby | countdown | race | spectate
+  offline: false,
+  myId: 'me',
+  hostId: null,
+  players: new Map(), // id -> { id, name, coat, poncho, slot, ready, racing, racer, look }
+  countdownEnd: 0,
+  raceStart: 0,
+  finishTime: null,
+  finishOrder: [], // ids in finishing order
+};
+
+function localRecord() {
+  return { id: state.myId, name: profile.name || 'You', coat: profile.coat, poncho: profile.poncho, slot: me.slot, racing: true };
 }
 
-function placeFood() {
-  do {
-    food = { x: Math.floor(Math.random() * CELLS), y: Math.floor(Math.random() * CELLS) };
-  } while (snake.some((s) => s.x === food.x && s.y === food.y));
+// Keep a 3D racer per player in sync with their look.
+function syncRacer(p) {
+  const look = `${p.coat}|${p.poncho}|${p.name}`;
+  if (p.racer && p.look === look) return;
+  if (p.racer) scene.remove(p.racer.group);
+  p.racer = createRacer({ coat: p.coat, poncho: p.poncho, name: p.id === state.myId ? '' : p.name });
+  p.look = look;
+  scene.add(p.racer.group);
+  placeAtSlot(p);
 }
-
-function start() {
-  reset();
-  overlay.classList.add('hidden');
-  overlay.classList.remove('over');
-  clearInterval(timer);
-  timer = setInterval(tick, TICK_MS);
+// In the lobby riders line up in front of the gate; at the countdown they enter the stalls.
+const LINEUP_Z = START_LINE_Z + 7;
+function placeAtSlot(p) {
+  const s = startSlot(p.slot);
+  const inStalls = state.mode === 'countdown' || state.mode === 'race';
+  const x = inStalls ? s.x : s.x * 0.55, z = inStalls ? s.z : LINEUP_Z;
+  p.racer.group.position.set(x, baseHeight(x, z), z);
+  p.racer.group.rotation.y = 0;
 }
-
-function gameOver() {
-  clearInterval(timer);
-  timer = null;
-  if (score > best) {
-    best = score;
-    bestEl.textContent = best;
-    try { localStorage.setItem('snake-best', best); } catch {}
+function setPlayers(list) {
+  const seen = new Set();
+  for (const info of list) {
+    seen.add(info.id);
+    const p = state.players.get(info.id) || {};
+    Object.assign(p, info);
+    state.players.set(info.id, p);
+    syncRacer(p);
   }
-  overlayTitle.textContent = `Game over - ${score} pts`;
-  overlayMsg.textContent = 'Press any key to restart';
-  overlay.classList.add('over');
-  overlay.classList.remove('hidden');
+  for (const [id, p] of state.players) {
+    if (!seen.has(id)) { scene.remove(p.racer.group); state.players.delete(id); }
+  }
+}
+function myRecord() { return state.players.get(state.myId); }
+
+// ---------------------------------------------------------------- flow -----
+ui.buildSwatches(profile, () => {
+  saveProfile();
+  const p = myRecord();
+  if (p) { p.coat = profile.coat; p.poncho = profile.poncho; syncRacer(p); }
+  net.send({ t: 'look', coat: profile.coat, poncho: profile.poncho });
+});
+el.name.value = profile.name;
+el.room.value = new URLSearchParams(location.search).get('room') || '';
+
+function enterMenu(message = '') {
+  state.mode = 'menu';
+  state.offline = false;
+  state.myId = 'me';
+  setPlayers([]);
+  me.reset(0);
+  setPlayers([localRecord()]);
+  ui.showJoinForm();
+  el.lobby.hidden = false;
+  el.hud.hidden = true;
+  el.results.hidden = true;
+  course.setGates(false);
+  ui.lobbyMessage(message);
 }
 
-function tick() {
-  dir = nextDir;
-  const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
-  const hitWall = head.x < 0 || head.y < 0 || head.x >= CELLS || head.y >= CELLS;
-  if (hitWall || snake.some((s) => s.x === head.x && s.y === head.y)) return gameOver();
-  snake.unshift(head);
-  if (head.x === food.x && head.y === food.y) {
-    score++;
-    scoreEl.textContent = score;
-    placeFood();
+el.joinForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  profile.name = el.name.value.trim().slice(0, 16);
+  saveProfile();
+  ui.lobbyMessage('Riding to the stalls…');
+  try {
+    if (!net.connected) await net.connect();
+  } catch {
+    ui.lobbyMessage("Couldn't reach the race server. You can still practice solo.");
+    return;
+  }
+  net.send({ t: 'join', room: el.room.value.trim(), name: profile.name, coat: profile.coat, poncho: profile.poncho });
+});
+
+el.solo.addEventListener('click', () => {
+  profile.name = el.name.value.trim().slice(0, 16);
+  saveProfile();
+  state.offline = true;
+  state.myId = 'me';
+  setPlayers([]);
+  setPlayers([localRecord()]);
+  startCountdown(3000);
+});
+
+el.ready.addEventListener('click', () => {
+  const p = myRecord();
+  net.send({ t: 'ready', v: !(p && p.ready) });
+});
+el.startNow.addEventListener('click', () => net.send({ t: 'start' }));
+el.copyLink.addEventListener('click', async () => {
+  const url = `${location.origin}${location.pathname}?room=${net.room}`;
+  try { await navigator.clipboard.writeText(url); ui.lobbyMessage('Invite link copied.'); } catch { ui.lobbyMessage(url); }
+});
+el.resultsClose.addEventListener('click', () => {
+  el.results.hidden = true;
+  if (state.offline) return enterMenu();
+  backToStalls();
+});
+
+function backToStalls() {
+  state.mode = 'lobby';
+  el.hud.hidden = true;
+  el.lobby.hidden = false;
+  me.reset(myRecord()?.slot ?? 0);
+  for (const p of state.players.values()) placeAtSlot(p);
+  net.remotes.clear();
+  course.setGates(false);
+}
+
+function startCountdown(ms) {
+  state.mode = 'countdown';
+  state.countdownEnd = performance.now() + ms;
+  state.finishTime = null;
+  state.finishOrder = [];
+  me.reset(myRecord()?.slot ?? 0);
+  for (const p of state.players.values()) placeAtSlot(p);
+  net.remotes.clear();
+  course.setGates(false);
+  el.lobby.hidden = true;
+  el.results.hidden = true;
+  el.hud.hidden = false;
+}
+
+// ---- Network events.
+net.addEventListener('welcome', ({ detail }) => {
+  state.myId = detail.id;
+  state.mode = 'lobby';
+  setPlayers([]);
+  me.reset(detail.slot);
+  ui.showRoom(detail.room);
+  ui.lobbyMessage('');
+  history.replaceState(null, '', `?room=${detail.room}${DEBUG ? '&debug' : ''}`);
+});
+net.addEventListener('roster', ({ detail }) => {
+  state.hostId = detail.host;
+  setPlayers(detail.players);
+  ui.renderRoster(detail.players, state.myId, state.hostId);
+  const mine = myRecord();
+  el.ready.textContent = mine?.ready ? 'Ready ✔' : "I'm ready";
+  el.ready.classList.toggle('on', !!mine?.ready);
+  el.startNow.hidden = state.hostId !== state.myId || detail.phase !== 'lobby';
+  el.ready.disabled = detail.phase !== 'lobby';
+});
+net.addEventListener('countdown', ({ detail }) => startCountdown(detail.inMs));
+net.addEventListener('inprogress', () => {
+  state.mode = 'spectate';
+  ui.lobbyMessage("A race is under way. You'll ride in the next one.");
+});
+net.addEventListener('finished', ({ detail }) => {
+  state.finishOrder.push(detail.id);
+  if (detail.id !== state.myId) {
+    const p = state.players.get(detail.id);
+    ui.toast(`${p?.name || 'A rider'} finished ${ui.ordinal(detail.place)}`, 1800);
   } else {
-    snake.pop();
+    ui.toast(`You finished ${ui.ordinal(detail.place)}! ${ui.fmtTime(detail.time)}`, 3000);
   }
-  draw();
-}
+});
+net.addEventListener('results', ({ detail }) => {
+  ui.showResults(detail.results, state.myId);
+  el.hud.hidden = true;
+  if (state.mode === 'spectate') state.mode = 'lobby';
+});
+net.addEventListener('error', ({ detail }) => ui.lobbyMessage(detail.msg));
+net.addEventListener('disconnect', () => enterMenu('Lost connection to the race server.'));
 
-// Turn a pixel map into a 10x10 canvas, optionally rotated to face a direction.
-function orient(map, d) {
-  const n = ART;
-  return map.map((_, i) => Array.from({ length: n }, (_, j) => {
-    if (d.x === 1) return map[i][j];
-    if (d.x === -1) return map[i][n - 1 - j];
-    if (d.y === -1) return map[j][n - 1 - i];
-    return map[n - 1 - j][i];
-  }).join(''));
-}
-
-function bake(map) {
-  const c = document.createElement('canvas');
-  c.width = c.height = ART;
-  const g = c.getContext('2d');
-  map.forEach((row, y) => [...row].forEach((ch, x) => {
-    if (ch === '.') return;
-    g.fillStyle = PALETTE[ch];
-    g.fillRect(x, y, 1, 1);
-  }));
-  return c;
-}
-
-const DIRS = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: -1 }, { x: 0, y: 1 }];
-const dirKey = (d) => `${d.x},${d.y}`;
-const headSprites = {};
-const tailSprites = {};
-for (const d of DIRS) {
-  headSprites[dirKey(d)] = bake(orient(HEAD, d));
-  tailSprites[dirKey(d)] = bake(orient(TAIL, d));
-}
-const bodySprite = bake(BODY);
-const appleSprite = bake(APPLE_MAP);
-
-// Board is static: checkered tiles with a few deterministic grass tufts.
-const board = document.createElement('canvas');
-board.width = board.height = CELLS * SIZE;
-(() => {
-  const g = board.getContext('2d');
-  for (let y = 0; y < CELLS; y++) {
-    for (let x = 0; x < CELLS; x++) {
-      g.fillStyle = (x + y) % 2 ? MOSS : INK;
-      g.fillRect(x * SIZE, y * SIZE, SIZE, SIZE);
-      const h = (x * 73 + y * 151 + x * y * 17) % 11;
-      if (h === 0) {
-        g.fillStyle = FERN;
-        const ox = x * SIZE + 12;
-        const oy = y * SIZE + 10;
-        g.fillRect(ox, oy, PX, PX);
-        g.fillRect(ox + PX, oy - PX, PX, PX);
+// ---------------------------------------------------------------- race -----
+function handlePlayerEvents() {
+  for (const ev of me.events) {
+    if (ev === 'stumble') { ui.toast('Stumbled!'); shake = 0.5; }
+    if (ev === 'respawn') { ui.toast('Took a fall. Back to the checkpoint.', 1800); shake = 0.3; }
+    if (ev === 'checkpoint') ui.toast('Checkpoint', 900);
+    if (ev === 'finish') {
+      state.finishTime = (performance.now() - state.raceStart) / 1000;
+      if (state.offline) {
+        state.finishOrder.push(state.myId);
+        let best = Infinity;
+        try { best = Number(localStorage.getItem('dustline-best')) || Infinity; } catch {}
+        const record = state.finishTime < best;
+        if (record) try { localStorage.setItem('dustline-best', state.finishTime.toFixed(2)); } catch {}
+        ui.toast(record ? `New best! ${ui.fmtTime(state.finishTime)}` : `Finished! Best ${ui.fmtTime(best)}`, 2500);
+        setTimeout(() => {
+          ui.showResults([{ id: 'me', name: profile.name || 'You', poncho: profile.poncho, time: state.finishTime }], 'me');
+          el.hud.hidden = true;
+        }, 2200);
+      } else {
+        net.sendState(me.snapshot(), Infinity);
+        net.send({ t: 'finish', time: state.finishTime });
       }
     }
   }
-})();
-
-function draw() {
-  ctx.drawImage(board, 0, 0);
-  ctx.drawImage(appleSprite, food.x * SIZE, food.y * SIZE, SIZE, SIZE);
-
-  const last = snake.length - 1;
-  for (let i = last; i >= 0; i--) {
-    const s = snake[i];
-    const px = s.x * SIZE;
-    const py = s.y * SIZE;
-    if (i === 0) {
-      ctx.drawImage(headSprites[dirKey(dir)], px, py, SIZE, SIZE);
-    } else if (i === last) {
-      const p = snake[i - 1];
-      ctx.drawImage(tailSprites[dirKey({ x: s.x - p.x, y: s.y - p.y })], px, py, SIZE, SIZE);
-    } else {
-      ctx.drawImage(bodySprite, px, py, SIZE, SIZE);
-      // outline only the sides that don't connect to a neighbouring segment
-      ctx.fillStyle = FERN;
-      const linked = (dx, dy) =>
-        [snake[i - 1], snake[i + 1]].some((n) => n.x === s.x + dx && n.y === s.y + dy);
-      if (!linked(0, -1)) ctx.fillRect(px, py, SIZE, PX);
-      if (!linked(0, 1)) ctx.fillRect(px, py + SIZE - PX, SIZE, PX);
-      if (!linked(-1, 0)) ctx.fillRect(px, py, PX, SIZE);
-      if (!linked(1, 0)) ctx.fillRect(px + SIZE - PX, py, PX, SIZE);
-    }
-  }
+  me.events.length = 0;
 }
 
-const KEYS = {
-  ArrowUp: { x: 0, y: -1 }, w: { x: 0, y: -1 },
-  ArrowDown: { x: 0, y: 1 }, s: { x: 0, y: 1 },
-  ArrowLeft: { x: -1, y: 0 }, a: { x: -1, y: 0 },
-  ArrowRight: { x: 1, y: 0 }, d: { x: 1, y: 0 },
-};
+// Riders in the race with their current z, for ranking and the progress bar.
+function riderPositions() {
+  const out = [];
+  for (const p of state.players.values()) {
+    if (!p.racing && !state.offline) continue;
+    const z = p.id === state.myId ? me.z : (net.sample(p.id)?.[2] ?? startSlot(p.slot).z);
+    out.push({ id: p.id, z, poncho: p.poncho });
+  }
+  const order = state.finishOrder;
+  out.sort((a, b) => {
+    const fa = order.indexOf(a.id), fb = order.indexOf(b.id);
+    if (fa >= 0 || fb >= 0) return (fa < 0 ? 1e9 : fa) - (fb < 0 ? 1e9 : fb);
+    return b.z - a.z;
+  });
+  return out;
+}
 
-window.addEventListener('keydown', (e) => {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  if (key in KEYS) e.preventDefault();
-  if (!timer) return start();
-  const d = KEYS[key];
-  if (d && !(d.x === -dir.x && d.y === -dir.y)) nextDir = d;
-});
+// ---------------------------------------------------------------- camera ---
+const camPos = new THREE.Vector3(0, 4, -6);
+const camLook = new THREE.Vector3();
+let shake = 0;
 
-reset();
+function chase(dt, x, y, z, yaw, speed) {
+  const fwd = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+  const want = new THREE.Vector3(x, y, z).addScaledVector(fwd, -7.5).add(new THREE.Vector3(0, 3.4, 0));
+  const floor = baseHeight(want.x, want.z) + 1.2;
+  if (want.y < floor && y > floor - 3) want.y = floor;
+  const k = 1 - Math.exp(-dt * 5);
+  camPos.lerp(want, k);
+  camLook.lerp(new THREE.Vector3(x, y + 1.4, z).addScaledVector(fwd, 5), 1 - Math.exp(-dt * 8));
+  camera.position.copy(camPos);
+  if (shake > 0) {
+    camera.position.x += (Math.random() - 0.5) * shake;
+    camera.position.y += (Math.random() - 0.5) * shake;
+    shake = Math.max(0, shake - dt * 1.5);
+  }
+  camera.lookAt(camLook);
+  const fov = 62 + Math.min(1, speed / TUNING.sprint) * 12;
+  if (Math.abs(camera.fov - fov) > 0.05) { camera.fov += (fov - camera.fov) * k; camera.updateProjectionMatrix(); }
+}
+
+function orbit(t, target) {
+  const a = t * 0.22 + 0.6;
+  camera.position.set(target.x + Math.sin(a) * 5.2, target.y + 2.0, target.z + Math.cos(a) * 5.2);
+  camera.lookAt(target.x, target.y + 1.2, target.z);
+  if (camera.fov !== 50) { camera.fov = 50; camera.updateProjectionMatrix(); }
+  // Shift the view so the horse sits to the right of the lobby panel.
+  if (!el.lobby.hidden && innerWidth > 760) {
+    const panel = el.lobby.getBoundingClientRect().right;
+    const visibleW = 2 * 5.4 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.aspect;
+    camera.translateX(-((panel / 2) / innerWidth) * visibleW);
+  }
+  camPos.copy(camera.position);
+  camLook.set(target.x, target.y + 1.2, target.z + 5);
+}
+
+// ---------------------------------------------------------------- loop -----
+const clock = new THREE.Clock();
+let elapsed = 0;
+
+const STEP = 1 / 60; // physics runs at a fixed rate, independent of frame rate
+let acc = 0;
+
+function frame() {
+  const dt = Math.min(0.25, clock.getDelta());
+  elapsed += dt;
+  const now = performance.now();
+  const mine = myRecord();
+
+  if (state.mode === 'countdown') {
+    const left = state.countdownEnd - now;
+    ui.setCountdown(left > 0 ? String(Math.ceil(left / 1000)) : 'GO!');
+    if (left <= 0) {
+      state.mode = 'race';
+      state.raceStart = state.countdownEnd;
+      me.locked = false;
+      course.setGates(true);
+      setTimeout(() => ui.setCountdown(''), 800);
+    }
+  }
+
+  const racing = state.mode === 'race' || state.mode === 'countdown';
+  if (racing) {
+    acc += dt;
+    while (acc >= STEP) { me.step(STEP, keys); acc -= STEP; }
+    handlePlayerEvents();
+    if (!state.offline) net.sendState(me.snapshot(), now);
+  }
+
+  // Own racer.
+  if (mine?.racer) {
+    const g = mine.racer.group;
+    if (racing) {
+      g.position.set(me.x, me.y, me.z);
+      g.rotation.y = me.yaw;
+    }
+    mine.racer.animate(dt, racing
+      ? { speed: me.speed, airborne: me.airborne, stumble: me.stumble / TUNING.stumbleTime }
+      : { speed: 0 });
+  }
+
+  // Remote racers.
+  let leader = null;
+  for (const p of state.players.values()) {
+    if (p.id === state.myId || !p.racer) continue;
+    const s = (state.mode === 'race' || state.mode === 'spectate' || state.mode === 'countdown') ? net.sample(p.id, now) : null;
+    if (s) {
+      p.racer.group.position.set(s[0], s[1], s[2]);
+      p.racer.group.rotation.y = s[3];
+      p.racer.animate(dt, { speed: s[4], airborne: !!(s[5] & 1), stumble: s[5] & 2 ? 0.8 : 0 });
+      if (!leader || s[2] > leader.s[2]) leader = { p, s };
+    } else {
+      p.racer.animate(dt, { speed: 0 });
+    }
+  }
+
+  // Camera.
+  if (state.freeCam) { /* debug: camera driven externally */ }
+  else if (racing) chase(dt, me.x, me.y, me.z, me.yaw, me.speed);
+  else if (state.mode === 'spectate' && leader) chase(dt, leader.s[0], leader.s[1], leader.s[2], leader.s[3], leader.s[4]);
+  else if (mine?.racer) orbit(elapsed, mine.racer.group.position);
+
+  // HUD.
+  if (racing) {
+    const riders = riderPositions();
+    const place = riders.findIndex((r) => r.id === state.myId) + 1 || 1;
+    const time = state.mode === 'race' ? (state.finishTime ?? (now - state.raceStart) / 1000) : 0;
+    ui.updateHud({
+      place, total: riders.length, time, speed: me.speed, stamina: me.stamina,
+      section: sectionAt(me.z), riders, myId: state.myId,
+    });
+  }
+
+  // Sun and its shadow box follow the camera's focus.
+  sun.target.position.copy(camLook);
+  sun.position.copy(camLook).addScaledVector(sunDir, 80);
+  sky.position.copy(camera.position);
+  course.update(dt);
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- debug ----
+if (DEBUG) {
+  window.__derby = { me, state, net, camera, scene, createRacer, THREE, cx: centerX, bh: baseHeight };
+  addEventListener('keydown', (e) => {
+    if (e.target instanceof HTMLInputElement) return;
+    const n = Number(e.key);
+    if (n >= 1 && n <= CHECKPOINTS.length) me.teleport(n - 1);
+    if (e.key === '9') { me.x = centerX(FINISH_Z - 25); me.z = FINISH_Z - 25; me.y = baseHeight(me.x, me.z); }
+  });
+}
+
+enterMenu();
+requestAnimationFrame(frame);

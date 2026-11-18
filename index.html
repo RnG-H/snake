@@ -3,25 +3,92 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Snake</title>
+    <title>Dustline Derby</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <main>
-      <h1>SNAKE</h1>
-      <div class="scores frame">
-        <span>Score: <b id="score">0</b></span>
-        <span>Best: <b id="best">0</b></span>
+    <canvas id="scene"></canvas>
+
+    <!-- In-race HUD -->
+    <div id="hud" hidden>
+      <div class="hud-top">
+        <div class="place"><b id="place">1st</b><span id="place-of">/ 1</span></div>
+        <div class="progress" aria-label="Race progress"><div id="progress-dots"></div></div>
+        <div class="timer" id="timer">0:00.0</div>
       </div>
-      <div class="board">
-        <canvas id="game" width="400" height="400"></canvas>
-        <div id="overlay" class="overlay">
-          <p id="overlay-title">Get ready</p>
-          <p id="overlay-msg" class="key">Press any key to start</p>
-          <small>Arrow keys / WASD</small>
+      <div id="section" class="section-label"></div>
+      <div id="countdown" class="countdown"></div>
+      <div id="toast" class="toast"></div>
+      <div class="hud-bottom">
+        <div class="meter">
+          <span class="label">Speed</span>
+          <div class="bar"><i id="speed-bar"></i></div>
+          <span class="value"><b id="speed">0</b> km/h</span>
+        </div>
+        <div class="meter">
+          <span class="label">Stamina</span>
+          <div class="bar stamina"><i id="stamina-bar"></i></div>
+          <span class="value"><kbd>Shift</kbd> spur</span>
         </div>
       </div>
-    </main>
+      <p class="keys-hint"><kbd>W</kbd> gallop · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>Space</kbd> jump · <kbd>S</kbd> rein in</p>
+    </div>
+
+    <!-- Lobby -->
+    <section id="lobby" class="panel">
+      <h1>Dustline <span>Derby</span></h1>
+      <p class="tagline">A cross-country horse race through the badlands. Jump the logs, skirt the mud, clear Devil's Gap and cross the rope bridge to the finish.</p>
+
+      <form id="join-form" autocomplete="off">
+        <label>Rider name <input id="name" maxlength="16" placeholder="Drifter" required /></label>
+        <label>Room code <input id="room" maxlength="4" placeholder="Leave empty for a new room" /></label>
+        <button class="btn primary" type="submit">Join race</button>
+        <button class="btn link" type="button" id="solo">Practice solo (offline)</button>
+      </form>
+
+      <div id="room-view" hidden>
+        <div class="room-code">
+          <span>Room</span><b id="room-code">----</b>
+          <button class="btn small" type="button" id="copy-link">Copy invite link</button>
+        </div>
+        <ul id="roster"></ul>
+        <div class="row">
+          <button class="btn primary" type="button" id="ready">I'm ready</button>
+          <button class="btn" type="button" id="start-now" hidden>Start now</button>
+        </div>
+        <p class="hint">The race starts when every rider is ready. The host can also start right away.</p>
+      </div>
+
+      <fieldset class="look">
+        <legend>Horse</legend>
+        <div id="coats" class="swatches"></div>
+        <p id="coat-name" class="hint"></p>
+      </fieldset>
+      <fieldset class="look">
+        <legend>Poncho</legend>
+        <div id="ponchos" class="swatches"></div>
+      </fieldset>
+
+      <details class="controls">
+        <summary>Controls</summary>
+        <dl>
+          <dt><kbd>W</kbd> / <kbd>↑</kbd></dt><dd>Gallop</dd>
+          <dt><kbd>A</kbd><kbd>D</kbd> / <kbd>←</kbd><kbd>→</kbd></dt><dd>Steer</dd>
+          <dt><kbd>Space</kbd></dt><dd>Jump (logs, fences, ledges, the gap)</dd>
+          <dt><kbd>Shift</kbd></dt><dd>Spur: sprint while stamina lasts</dd>
+          <dt><kbd>S</kbd> / <kbd>↓</kbd></dt><dd>Rein in</dd>
+        </dl>
+      </details>
+      <p id="lobby-msg" class="msg" role="status"></p>
+    </section>
+
+    <!-- Results -->
+    <section id="results" class="panel results" hidden>
+      <h2>Results</h2>
+      <ol id="results-list"></ol>
+      <button class="btn primary" type="button" id="results-close">Back to the stalls</button>
+    </section>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
